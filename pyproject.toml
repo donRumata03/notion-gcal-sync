@@ -2,4 +2,25 @@
 name = "notion-gcal-sync"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "fastapi",
+    "google-api-python-client",
+    "google-auth",
+    "google-auth-oauthlib",
+    "notion-client",
+    "pydantic",
+    "pydantic-settings",
+    "python-dotenv",
+    "uvicorn[standard]",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.uv]
+default-groups = ["dev"]

@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+token.json
+credentials.json
+client_secret_*.json
+service_account.json
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+*.pyc
+uvicorn*.log
+local-server*.log
+data/
+*.sqlite3
