@@ -18,15 +18,23 @@ class FakeNotionClient:
 class FakeGoogleCalendarClient:
     def __init__(self) -> None:
         self.deleted_ids: list[str] = []
+        self.created_bodies: list[dict] = []
+        self.updated_ids: list[str] = []
+        self.existing_events: list[CalendarEventResult] = []
 
     def create_event(self, event_body: dict) -> CalendarEventResult:
+        self.created_bodies.append(event_body)
         return CalendarEventResult(event_id="created-1", html_link="https://calendar.test/e/created-1", raw=event_body)
 
     def update_event(self, event_id: str, event_body: dict) -> CalendarEventResult:
+        self.updated_ids.append(event_id)
         return CalendarEventResult(event_id=event_id, html_link=f"https://calendar.test/e/{event_id}", raw=event_body)
 
     def delete_event(self, event_id: str) -> None:
         self.deleted_ids.append(event_id)
+
+    def find_events_by_notion_page_id(self, page_id: str) -> list[CalendarEventResult]:
+        return self.existing_events
 
 
 class FakeStateStore:
@@ -208,6 +216,41 @@ def test_sync_page_payload_uses_inline_page_without_fetching() -> None:
 
     assert result.created == 1
     assert state_store.records["page-1"].event_id == "created-1"
+
+
+def test_sync_page_object_adopts_existing_calendar_event_when_state_is_missing() -> None:
+    notion_client = FakeNotionClient()
+    gcal_client = FakeGoogleCalendarClient()
+    gcal_client.existing_events = [
+        CalendarEventResult(event_id="existing-1", html_link="https://calendar.test/e/existing-1", raw={})
+    ]
+    state_store = FakeStateStore()
+    page = _page_from_task(_task())
+
+    result = sync_page_object(page, notion_client, gcal_client, state_store, _settings())
+
+    assert result.status == "updated"
+    assert result.event_id == "existing-1"
+    assert gcal_client.created_bodies == []
+    assert gcal_client.updated_ids == ["existing-1"]
+    assert state_store.records["page-1"].event_id == "existing-1"
+
+
+def test_sync_page_object_deletes_duplicate_calendar_events() -> None:
+    notion_client = FakeNotionClient()
+    gcal_client = FakeGoogleCalendarClient()
+    gcal_client.existing_events = [
+        CalendarEventResult(event_id="evt-1", html_link="https://calendar.test/e/evt-1", raw={}),
+        CalendarEventResult(event_id="evt-duplicate", html_link="https://calendar.test/e/evt-duplicate", raw={}),
+    ]
+    state_store = FakeStateStore()
+    page = _page_from_task(_task())
+
+    result = sync_page_object(page, notion_client, gcal_client, state_store, _settings())
+
+    assert result.status == "updated"
+    assert result.event_id == "evt-1"
+    assert gcal_client.deleted_ids == ["evt-duplicate"]
 
 
 def test_status_not_in_mapping_filter_excludes_completed_status() -> None:

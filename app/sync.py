@@ -28,6 +28,8 @@ class GoogleCalendarClientProtocol(Protocol):
 
     def delete_event(self, event_id: str) -> None: ...
 
+    def find_events_by_notion_page_id(self, page_id: str) -> list[CalendarEventResult]: ...
+
 
 def decide_sync_action(task: NotionTask, settings: Settings) -> str:
     del settings
@@ -94,18 +96,52 @@ def sync_page_object(
 
         event_body = build_calendar_event(task, resolved_settings)
         new_hash = compute_sync_hash(event_body)
+        existing_events = gcal_client.find_events_by_notion_page_id(task.page_id)
+        duplicate_event_ids = _duplicate_event_ids(existing_events, task.google_event_id)
 
         if task.google_event_id and task.sync_hash == new_hash:
+            if duplicate_event_ids:
+                _delete_duplicate_events(gcal_client, duplicate_event_ids)
+                state_store.upsert_success(task.page_id, task.google_event_id, new_hash, task.calendar_url, mapping_id=mapping_id)
+                return SyncResult(
+                    status="updated",
+                    page_id=task.page_id,
+                    event_id=task.google_event_id,
+                    message="Calendar event already up to date; duplicate events deleted.",
+                )
             return SyncResult(status="unchanged", page_id=task.page_id, event_id=task.google_event_id, message="Calendar event already up to date.")
 
-        if task.google_event_id:
+        event_id_to_update = task.google_event_id or _canonical_existing_event_id(existing_events)
+        if event_id_to_update:
             try:
-                result = gcal_client.update_event(task.google_event_id, event_body)
+                result = gcal_client.update_event(event_id_to_update, event_body)
                 _sleep_after_calendar_write(resolved_settings)
+                duplicates_after_update = _duplicate_event_ids(existing_events, result.event_id)
+                if duplicates_after_update:
+                    _delete_duplicate_events(gcal_client, duplicates_after_update)
                 state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link, mapping_id=mapping_id)
-                return SyncResult(status="updated", page_id=task.page_id, event_id=result.event_id, message="Calendar event updated.")
+                message = "Calendar event updated."
+                if not task.google_event_id:
+                    message = "Existing calendar event adopted and updated."
+                if duplicates_after_update:
+                    message = f"{message} Duplicate events deleted."
+                return SyncResult(status="updated", page_id=task.page_id, event_id=result.event_id, message=message)
             except EventNotFoundError:
-                pass
+                existing_events = gcal_client.find_events_by_notion_page_id(task.page_id)
+                event_id_to_update = _canonical_existing_event_id(existing_events)
+                if event_id_to_update:
+                    result = gcal_client.update_event(event_id_to_update, event_body)
+                    _sleep_after_calendar_write(resolved_settings)
+                    duplicates_after_update = _duplicate_event_ids(existing_events, result.event_id)
+                    if duplicates_after_update:
+                        _delete_duplicate_events(gcal_client, duplicates_after_update)
+                    state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link, mapping_id=mapping_id)
+                    return SyncResult(
+                        status="updated",
+                        page_id=task.page_id,
+                        event_id=result.event_id,
+                        message="Tracked event was missing; existing calendar event adopted and updated.",
+                    )
 
         result = gcal_client.create_event(event_body)
         _sleep_after_calendar_write(resolved_settings)
@@ -296,6 +332,25 @@ def _coerce_datetime(value: date | datetime) -> datetime:
 def _sleep_after_calendar_write(settings: Settings) -> None:
     if settings.sync_calendar_write_delay_seconds > 0:
         sleep(settings.sync_calendar_write_delay_seconds)
+
+
+def _canonical_existing_event_id(existing_events: list[CalendarEventResult]) -> str | None:
+    if not existing_events:
+        return None
+    return existing_events[0].event_id
+
+
+def _duplicate_event_ids(existing_events: list[CalendarEventResult], canonical_event_id: str | None) -> list[str]:
+    if not canonical_event_id:
+        canonical_event_id = _canonical_existing_event_id(existing_events)
+    if not canonical_event_id:
+        return []
+    return [event.event_id for event in existing_events if event.event_id != canonical_event_id]
+
+
+def _delete_duplicate_events(gcal_client: GoogleCalendarClientProtocol, event_ids: list[str]) -> None:
+    for event_id in event_ids:
+        gcal_client.delete_event(event_id)
 
 
 def _is_page_object(value: dict[str, Any]) -> bool:

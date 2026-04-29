@@ -84,6 +84,43 @@ class GoogleCalendarClient:
                 return
             raise
 
+    def find_events_by_notion_page_id(self, page_id: str) -> list[CalendarEventResult]:
+        events_by_id: dict[str, CalendarEventResult] = {}
+
+        for event in self._list_events(privateExtendedProperty=f"notionPageId={page_id}"):
+            _add_event_result(events_by_id, event)
+
+        normalized_page_id = page_id.replace("-", "")
+        if normalized_page_id != page_id:
+            for event in self._list_events(privateExtendedProperty=f"notionPageId={normalized_page_id}"):
+                _add_event_result(events_by_id, event)
+
+        for event in self._list_events(q=page_id):
+            if f"Page ID: {page_id}" in str(event.get("description", "")):
+                _add_event_result(events_by_id, event)
+
+        return sorted(events_by_id.values(), key=_event_sort_key)
+
+    def _list_events(self, **params: Any) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            request_params = {
+                "calendarId": self.calendar_id,
+                "showDeleted": False,
+                "singleEvents": True,
+                "maxResults": 250,
+                **params,
+            }
+            if page_token:
+                request_params["pageToken"] = page_token
+
+            response = _execute_with_retries(lambda: self.service.events().list(**request_params).execute())
+            events.extend(item for item in response.get("items", []) if item.get("id"))
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                return events
+
 
 def _execute_with_retries(operation: Callable[[], Any], max_attempts: int = 5) -> Any:
     delay_seconds = 1.0
@@ -108,3 +145,23 @@ def _is_retryable_http_error(exc: HttpError) -> bool:
     if isinstance(content, bytes):
         content = content.decode("utf-8", errors="ignore")
     return any(reason in str(content) for reason in RETRYABLE_REASONS)
+
+
+def _add_event_result(events_by_id: dict[str, CalendarEventResult], event: dict[str, Any]) -> None:
+    event_id = event.get("id")
+    if not isinstance(event_id, str):
+        return
+    events_by_id[event_id] = CalendarEventResult(
+        event_id=event_id,
+        html_link=event.get("htmlLink"),
+        raw=event,
+    )
+
+
+def _event_sort_key(event: CalendarEventResult) -> tuple[str, str]:
+    raw_start = event.raw.get("start")
+    if isinstance(raw_start, dict):
+        start = str(raw_start.get("dateTime") or raw_start.get("date") or "")
+    else:
+        start = ""
+    return (start, event.event_id)
