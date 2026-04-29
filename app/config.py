@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     sync_max_pages: int = Field(default=100, alias="SYNC_MAX_PAGES")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     state_db_path: str = Field(default="./data/sync-state.sqlite3", alias="STATE_DB_PATH")
+    state_database_url: str | None = Field(default=None, alias="STATE_DATABASE_URL")
+    cloud_sql_connection_name: str | None = Field(default=None, alias="CLOUD_SQL_CONNECTION_NAME")
+    cloud_sql_database: str | None = Field(default=None, alias="CLOUD_SQL_DATABASE")
+    cloud_sql_user: str | None = Field(default=None, alias="CLOUD_SQL_USER")
+    cloud_sql_password: str | None = Field(default=None, alias="CLOUD_SQL_PASSWORD")
 
     notion_prop_title: str = Field(default="Name", alias="NOTION_PROP_TITLE")
     notion_prop_date: str = Field(default="Date/time", alias="NOTION_PROP_DATE")

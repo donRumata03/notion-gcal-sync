@@ -5,7 +5,7 @@ One-way sync from a Notion database into Google Calendar.
 The app treats Notion as read-only:
 - it never writes sync metadata back to Notion
 - the sync key is the Notion `page_id`
-- Google event IDs, sync hashes, errors, and last sync timestamps live only in a local SQLite database
+- Google event IDs, sync hashes, errors, and last sync timestamps live in the configured state database
 
 ## Notion properties used
 - `Name` (`title`)
@@ -44,6 +44,11 @@ Optional:
 - `SYNC_DEFAULT_EVENT_MINUTES`
 - `SYNC_MAX_PAGES`
 - `STATE_DB_PATH`
+- `STATE_DATABASE_URL`
+- `CLOUD_SQL_CONNECTION_NAME`
+- `CLOUD_SQL_DATABASE`
+- `CLOUD_SQL_USER`
+- `CLOUD_SQL_PASSWORD`
 
 ## Get a Google refresh token
 Using your existing OAuth client JSON:
@@ -75,13 +80,28 @@ Each synced event stores the Notion page ID in two places:
 - `extendedProperties.private.notionPageId`
 - the event description as `Page ID: ...`
 
-## Local state
-Default path:
+## State storage
+By default the app uses local SQLite:
 ```text
 ./data/sync-state.sqlite3
 ```
 
-Cloud Run filesystem is ephemeral. If you deploy there and keep local SQLite, instance restarts can recreate calendar events. Use a persistent store if you need durable sync state in Cloud Run.
+For Cloud Run, use Cloud SQL for PostgreSQL instead of local SQLite. Attach the Cloud SQL instance to the Cloud Run service and set:
+```text
+CLOUD_SQL_CONNECTION_NAME=project:region:instance
+CLOUD_SQL_DATABASE=notion_gcal_sync
+CLOUD_SQL_USER=sync_user
+CLOUD_SQL_PASSWORD=...
+```
+
+The app creates the `sync_state` table automatically.
+
+For local Postgres or the Cloud SQL Auth Proxy, set a direct URL instead:
+```text
+STATE_DATABASE_URL=postgresql://sync_user:password@127.0.0.1:5432/notion_gcal_sync
+```
+
+If neither `STATE_DATABASE_URL` nor `CLOUD_SQL_CONNECTION_NAME` is set, SQLite is used.
 
 ## Deploy on Cloud Run
 Build and deploy from the repo, then configure runtime environment separately from git.
@@ -92,7 +112,8 @@ Recommended Cloud Run environment variables:
 - `APP_TIMEZONE`
 - `SYNC_DEFAULT_EVENT_MINUTES`
 - `SYNC_MAX_PAGES`
-- `STATE_DB_PATH` if you intentionally want local ephemeral SQLite
+- `CLOUD_SQL_CONNECTION_NAME`
+- `CLOUD_SQL_DATABASE`
 - `NOTION_PROP_TITLE`
 - `NOTION_PROP_DATE`
 
@@ -100,8 +121,8 @@ Recommended Secret Manager secrets:
 - `NOTION_TOKEN`
 - `GOOGLE_REFRESH_TOKEN`
 - either `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, or a mounted `GOOGLE_CLIENT_SECRET_FILE`
+- `CLOUD_SQL_USER`
+- `CLOUD_SQL_PASSWORD`
 - `NOTION_WEBHOOK_SECRET` only if your webhook sender signs requests with `X-Notion-Signature`
 
-Practical note for Cloud Run:
-- local SQLite is not durable across instance restarts or revisions
-- if you need stable deduplication, move `sync_state` to a persistent database before relying on production sync
+Do not configure `STATE_DB_PATH` for production Cloud Run unless you intentionally want ephemeral local state. Local SQLite on Cloud Run can lose `page_id -> event_id` mappings on restarts or new revisions and recreate calendar events.

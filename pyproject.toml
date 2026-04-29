@@ -8,6 +8,7 @@ dependencies = [
     "google-auth",
     "google-auth-oauthlib",
     "notion-client",
+    "psycopg[binary]",
     "pydantic",
     "pydantic-settings",
     "python-dotenv",
