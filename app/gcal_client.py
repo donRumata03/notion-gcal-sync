@@ -33,14 +33,15 @@ def get_calendar_service(settings: Settings | None = None):
 
 
 class GoogleCalendarClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, calendar_id: str | None = None) -> None:
         self.settings = settings or get_settings()
+        self.calendar_id = calendar_id or self.settings.google_calendar_id
         self.service = get_calendar_service(self.settings)
 
     def create_event(self, event_body: dict) -> CalendarEventResult:
         response = _execute_with_retries(
             lambda: self.service.events()
-            .insert(calendarId=self.settings.google_calendar_id, body=event_body)
+            .insert(calendarId=self.calendar_id, body=event_body)
             .execute()
         )
         return CalendarEventResult(
@@ -54,7 +55,7 @@ class GoogleCalendarClient:
             response = _execute_with_retries(
                 lambda: self.service.events()
                 .patch(
-                    calendarId=self.settings.google_calendar_id,
+                    calendarId=self.calendar_id,
                     eventId=event_id,
                     body=event_body,
                 )
@@ -75,7 +76,7 @@ class GoogleCalendarClient:
         try:
             _execute_with_retries(
                 lambda: self.service.events()
-                .delete(calendarId=self.settings.google_calendar_id, eventId=event_id)
+                .delete(calendarId=self.calendar_id, eventId=event_id)
                 .execute()
             )
         except HttpError as exc:

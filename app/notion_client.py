@@ -6,7 +6,7 @@ from typing import Any
 from notion_client import Client
 from notion_client.errors import APIResponseError
 
-from app.config import Settings, get_settings
+from app.config import Settings, SyncMapping, get_settings
 from app.exceptions import NotionSchemaError
 from app.logging_utils import get_logger
 from app.models import get_checkbox, get_date, get_number, get_rich_text, get_status, get_title
@@ -17,8 +17,9 @@ logger = get_logger(__name__)
 
 
 class NotionAPIClient:
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(self, settings: Settings | None = None, mapping: SyncMapping | None = None) -> None:
         self.settings = settings or get_settings()
+        self.mapping = mapping or self.settings.resolved_sync_mappings()[0]
         self.client = Client(auth=self.settings.notion_token, notion_version=NOTION_VERSION)
 
     def get_page(self, page_id: str) -> dict[str, Any]:
@@ -35,7 +36,7 @@ class NotionAPIClient:
                 "data_source_id": self.data_source_id,
                 "page_size": min(remaining, 100),
                 "result_type": "page",
-                "filter": {"property": self.settings.notion_prop_date, "date": {"is_not_empty": True}},
+                "filter": self._build_query_filter(),
             }
             if cursor:
                 payload["start_cursor"] = cursor
@@ -57,7 +58,9 @@ class NotionAPIClient:
 
     @cached_property
     def data_source_id(self) -> str:
-        raw_id = self.settings.notion_database_id
+        raw_id = self.mapping.notion_database_id
+        if raw_id is None:
+            raise NotionSchemaError("The sync mapping is missing notion_database_id.")
 
         try:
             self.client.data_sources.retrieve(data_source_id=raw_id)
@@ -75,10 +78,23 @@ class NotionAPIClient:
         return data_sources[0]["id"]
 
     def _validate_required_schema(self) -> None:
-        required_properties = {self.settings.notion_prop_title, self.settings.notion_prop_date}
+        required_properties = {self.mapping.title_property, self.mapping.date_property}
+        required_properties.update(mapping_filter.property for mapping_filter in self.mapping.filters)
         missing = sorted(name for name in required_properties if name not in self.schema)
         if missing:
             raise NotionSchemaError(f"Missing required Notion properties: {', '.join(missing)}")
+
+    def _build_query_filter(self) -> dict[str, Any]:
+        filters: list[dict[str, Any]] = [
+            {"property": self.mapping.date_property, "date": {"is_not_empty": True}},
+        ]
+        for mapping_filter in self.mapping.filters:
+            if mapping_filter.type == "status_not_in":
+                for value in mapping_filter.values:
+                    filters.append({"property": mapping_filter.property, "status": {"does_not_equal": value}})
+        if len(filters) == 1:
+            return filters[0]
+        return {"and": filters}
 
 
 __all__ = [

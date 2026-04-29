@@ -1,93 +1,98 @@
 # Notion -> Google Calendar Sync
 
-One-way sync from a Notion database into Google Calendar.
+A free, self-hosted Notion to Google Calendar sync service. Unlike paid hosted tools such as https://2sync.com/, this repo is yours to run, inspect, extend, and deploy without a subscription.
 
-The app treats Notion as read-only:
-- it never writes sync metadata back to Notion
-- the sync key is the Notion `page_id`
-- Google event IDs, sync hashes, errors, and last sync timestamps live in the configured state database
+It syncs existing database pages and future edits from Notion into Google Calendar. Notion stays read-only: the app never writes sync metadata back to Notion.
 
-## Notion properties used
-- `Name` (`title`)
-- `Date/time` (`date`)
+## What It Syncs
+- Notion pages with a configured date property.
+- All-day dates, date ranges, exact start times, and exact start/end times.
+- One Notion database to one calendar, or many databases to many calendars.
+- Optional per-route filters, for example "only sync Learning deadlines where `Done?!` is not completed".
 
-Only pages where `Date/time` is not empty are synced to Google Calendar.
+Each Google Calendar event stores the Notion page ID in:
+- `extendedProperties.private.notionPageId`
+- the event description as `Page ID: ...`
 
-Supported Notion date shapes:
-- all-day date with only a start day
-- all-day date range
-- exact start time without an end time
-- exact start and end time
-
-If a timed Notion date has no end time, the app uses `SYNC_DEFAULT_EVENT_MINUTES`.
-
-## Local setup with uv
+## Quick Start
 ```bash
 uv sync
 copy .env.example .env
+uv run python scripts/get_google_refresh_token.py
 uv run uvicorn app.main:app --reload
 ```
 
-## Environment
+Trigger a full sync:
+```bash
+curl -X POST http://127.0.0.1:8000/sync-all
+```
+
+`/sync-all` handles pre-existing pages. Webhooks handle later edits.
+
+## Basic Config
 Required:
 - `NOTION_TOKEN`
 - `NOTION_DATABASE_ID`
 - `GOOGLE_REFRESH_TOKEN`
 - `GOOGLE_CALENDAR_ID`
 
-For Google OAuth client credentials, use either:
+Google OAuth client credentials can be configured as:
 - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
-- or `GOOGLE_CLIENT_SECRET_FILE` pointing at your downloaded `client_secret...json`
+- or `GOOGLE_CLIENT_SECRET_FILE` pointing at a local `client_secret...json`
 
-Optional:
-- `APP_TIMEZONE`
-- `SYNC_DEFAULT_EVENT_MINUTES`
-- `SYNC_MAX_PAGES`
-- `SYNC_CALENDAR_WRITE_DELAY_SECONDS`
-- `STATE_DB_PATH`
-- `STATE_DATABASE_URL`
-- `CLOUD_SQL_CONNECTION_NAME`
-- `CLOUD_SQL_DATABASE`
-- `CLOUD_SQL_USER`
-- `CLOUD_SQL_PASSWORD`
-
-## Get a Google refresh token
-Using your existing OAuth client JSON:
-```bash
-uv run python scripts/get_google_refresh_token.py --client-secret-file ./client_secret_xxx.json
+Default single-route behavior:
+```text
+NOTION_DATABASE_ID=your_notion_database_id
+GOOGLE_CALENDAR_ID=primary
+NOTION_PROP_TITLE=Name
+NOTION_PROP_DATE=Date/time
 ```
 
-Or set `GOOGLE_CLIENT_SECRET_FILE` in `.env` and run:
-```bash
-uv run python scripts/get_google_refresh_token.py
+## Multi-Route Config
+Set `SYNC_MAPPINGS` to route many Notion databases to many Google Calendars. When this is set, it replaces the single `NOTION_DATABASE_ID -> GOOGLE_CALENDAR_ID` route.
+
+Example:
+```json
+[
+  {
+    "id": "main",
+    "notion_database_ids": ["32573b18d05641f3a559a4aa61bd6fea"],
+    "google_calendar_id": "primary",
+    "title_property": "Name",
+    "date_property": "Date/time"
+  },
+  {
+    "id": "learning-deadlines",
+    "notion_database_ids": ["3b35389c4b674936b4fdf4dfb928d2c2"],
+    "google_calendar_id": "84c2bf5ac1d365f289013c323fdd286b04967e938d340903503928a39b28f776@group.calendar.google.com",
+    "title_property": "Name",
+    "date_property": "Deadline",
+    "filters": [
+      {"property": "Done?!", "type": "status_not_in", "values": ["Done", "Completed", "Complete"]}
+    ]
+  }
+]
 ```
 
-## Trigger sync
-```bash
-curl -X POST http://127.0.0.1:8000/sync-all
-```
+The first route syncs the main task database by `Date/time`. The second route syncs Learning deadlines by `Deadline`, but excludes completed tasks based on `Done?!`.
 
 ## Webhook
-Endpoint:
+Webhook endpoint:
 ```text
 POST /notion-webhook
 ```
 
-If the webhook payload contains the full page object, the app syncs directly from that payload.
-If the webhook only contains page identifiers, the app fetches the current page from Notion before syncing.
+If the webhook contains a full page object, the app syncs from that payload. If it contains only page IDs, the app fetches the current page from Notion.
 
-## Google Calendar event metadata
-Each synced event stores the Notion page ID in two places:
-- `extendedProperties.private.notionPageId`
-- the event description as `Page ID: ...`
+Configure the same webhook URL for every Notion database used in `SYNC_MAPPINGS`.
 
-## State storage
-By default the app uses local SQLite:
+## State Storage
+Local default:
 ```text
-./data/sync-state.sqlite3
+STATE_DB_PATH=./data/sync-state.sqlite3
 ```
 
-For Cloud Run, use Cloud SQL for PostgreSQL instead of local SQLite. Attach the Cloud SQL instance to the Cloud Run service and set:
+Cloud Run production setup should use Cloud SQL for PostgreSQL:
 ```text
 CLOUD_SQL_CONNECTION_NAME=project:region:instance
 CLOUD_SQL_DATABASE=notion_gcal_sync
@@ -97,34 +102,19 @@ CLOUD_SQL_PASSWORD=...
 
 The app creates the `sync_state` table automatically.
 
-For local Postgres or the Cloud SQL Auth Proxy, set a direct URL instead:
+For local Postgres or Cloud SQL Auth Proxy:
 ```text
 STATE_DATABASE_URL=postgresql://sync_user:password@127.0.0.1:5432/notion_gcal_sync
 ```
 
-If neither `STATE_DATABASE_URL` nor `CLOUD_SQL_CONNECTION_NAME` is set, SQLite is used.
-
-## Deploy on Cloud Run
-Build and deploy from the repo, then configure runtime environment separately from git.
-
-Recommended Cloud Run environment variables:
-- `NOTION_DATABASE_ID`
-- `GOOGLE_CALENDAR_ID`
-- `APP_TIMEZONE`
-- `SYNC_DEFAULT_EVENT_MINUTES`
-- `SYNC_MAX_PAGES`
-- `SYNC_CALENDAR_WRITE_DELAY_SECONDS`
-- `CLOUD_SQL_CONNECTION_NAME`
-- `CLOUD_SQL_DATABASE`
-- `NOTION_PROP_TITLE`
-- `NOTION_PROP_DATE`
-
-Recommended Secret Manager secrets:
+## Cloud Run Secrets
+Use Secret Manager for:
 - `NOTION_TOKEN`
 - `GOOGLE_REFRESH_TOKEN`
-- either `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`, or a mounted `GOOGLE_CLIENT_SECRET_FILE`
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
 - `CLOUD_SQL_USER`
 - `CLOUD_SQL_PASSWORD`
 - `NOTION_WEBHOOK_SECRET` only if your webhook sender signs requests with `X-Notion-Signature`
 
-Do not configure `STATE_DB_PATH` for production Cloud Run unless you intentionally want ephemeral local state. Local SQLite on Cloud Run can lose `page_id -> event_id` mappings on restarts or new revisions and recreate calendar events.
+Use normal Cloud Run env vars for non-secret config such as `SYNC_MAPPINGS`, `APP_TIMEZONE`, and `SYNC_MAX_PAGES`.

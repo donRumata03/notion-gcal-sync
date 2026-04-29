@@ -1,9 +1,10 @@
 from datetime import date, datetime
 
-from app.config import Settings
+from app.config import MappingFilter, Settings, SyncMapping
 from app.models import CalendarEventResult, NotionDate, NotionTask
 from app.state_store import SyncStateRecord
 from app.sync import build_calendar_event, decide_sync_action, sync_page_object, sync_page_payload
+from app.sync import page_matches_mapping_filters
 
 
 class FakeNotionClient:
@@ -34,26 +35,35 @@ class FakeStateStore:
         self.error_calls: list[dict[str, str]] = []
         self.deleted_page_ids: list[str] = []
 
-    def get_record(self, page_id: str) -> SyncStateRecord | None:
-        return self.records.get(page_id)
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None:
+        return self.records.get(_state_key(page_id, mapping_id))
 
-    def list_page_ids(self) -> list[str]:
-        return sorted(self.records)
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]:
+        prefix = "" if mapping_id == "default" else f"{mapping_id}:"
+        return sorted(key.removeprefix(prefix) for key in self.records if key.startswith(prefix))
 
-    def upsert_success(self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None) -> None:
-        self.records[page_id] = SyncStateRecord(
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None:
+        self.records[_state_key(page_id, mapping_id)] = SyncStateRecord(
             page_id=page_id,
             event_id=event_id,
             sync_hash=sync_hash,
             calendar_url=calendar_url,
         )
 
-    def upsert_error(self, page_id: str, error_message: str) -> None:
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None:
         self.error_calls.append({"page_id": page_id, "error_message": error_message})
 
-    def delete_record(self, page_id: str) -> None:
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None:
         self.deleted_page_ids.append(page_id)
-        self.records.pop(page_id, None)
+        self.records.pop(_state_key(page_id, mapping_id), None)
+
+
+def _state_key(page_id: str, mapping_id: str) -> str:
+    if mapping_id == "default":
+        return page_id
+    return f"{mapping_id}:{page_id}"
 
 
 def _settings(done_behavior: str = "delete") -> Settings:
@@ -196,5 +206,54 @@ def test_sync_page_payload_uses_inline_page_without_fetching() -> None:
 
     result = sync_page_payload(page, notion_client, gcal_client, state_store, _settings())
 
-    assert result.status == "created"
+    assert result.created == 1
     assert state_store.records["page-1"].event_id == "created-1"
+
+
+def test_status_not_in_mapping_filter_excludes_completed_status() -> None:
+    mapping = SyncMapping(
+        id="learning",
+        notion_database_id="db",
+        google_calendar_id="learning-calendar",
+        date_property="Deadline",
+        filters=[MappingFilter(property="Done?!", values=["Done", "Completed"])],
+    )
+    page = _page_from_task(_task())
+    page["properties"]["Done?!"] = {"type": "status", "status": {"name": "Done"}}
+
+    assert page_matches_mapping_filters(page, mapping) is False
+
+
+def test_status_not_in_mapping_filter_allows_not_started_status() -> None:
+    mapping = SyncMapping(
+        id="learning",
+        notion_database_id="db",
+        google_calendar_id="learning-calendar",
+        date_property="Deadline",
+        filters=[MappingFilter(property="Done?!", values=["Done", "Completed"])],
+    )
+    page = _page_from_task(_task())
+    page["properties"]["Done?!"] = {"type": "status", "status": {"name": "Not started"}}
+
+    assert page_matches_mapping_filters(page, mapping) is True
+
+
+def test_sync_mapping_expands_database_id_arrays() -> None:
+    settings = _settings().model_copy(
+        update={
+            "sync_mappings": [
+                SyncMapping(
+                    id="primary",
+                    notion_database_ids=["db-1", "db-2"],
+                    google_calendar_id="calendar-1",
+                    date_property="Date/time",
+                )
+            ]
+        }
+    )
+
+    mappings = settings.resolved_sync_mappings()
+
+    assert [mapping.id for mapping in mappings] == ["primary-1", "primary-2"]
+    assert [mapping.notion_database_id for mapping in mappings] == ["db-1", "db-2"]
+    assert [mapping.google_calendar_id for mapping in mappings] == ["calendar-1", "calendar-1"]

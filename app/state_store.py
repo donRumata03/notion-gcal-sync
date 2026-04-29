@@ -21,15 +21,17 @@ class SyncStateRecord(BaseModel):
 
 
 class StateStoreBackend(Protocol):
-    def get_record(self, page_id: str) -> SyncStateRecord | None: ...
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None: ...
 
-    def list_page_ids(self) -> list[str]: ...
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]: ...
 
-    def upsert_success(self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None) -> None: ...
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None: ...
 
-    def upsert_error(self, page_id: str, error_message: str) -> None: ...
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None: ...
 
-    def delete_record(self, page_id: str) -> None: ...
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None: ...
 
 
 class SyncStateStore:
@@ -37,20 +39,22 @@ class SyncStateStore:
         self.settings = settings or get_settings()
         self.backend = create_state_store_backend(self.settings)
 
-    def get_record(self, page_id: str) -> SyncStateRecord | None:
-        return self.backend.get_record(page_id)
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None:
+        return self.backend.get_record(page_id, mapping_id)
 
-    def list_page_ids(self) -> list[str]:
-        return self.backend.list_page_ids()
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]:
+        return self.backend.list_page_ids(mapping_id)
 
-    def upsert_success(self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None) -> None:
-        self.backend.upsert_success(page_id, event_id, sync_hash, calendar_url)
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None:
+        self.backend.upsert_success(page_id, event_id, sync_hash, calendar_url, mapping_id)
 
-    def upsert_error(self, page_id: str, error_message: str) -> None:
-        self.backend.upsert_error(page_id, error_message)
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None:
+        self.backend.upsert_error(page_id, error_message, mapping_id)
 
-    def delete_record(self, page_id: str) -> None:
-        self.backend.delete_record(page_id)
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None:
+        self.backend.delete_record(page_id, mapping_id)
 
 
 def create_state_store_backend(settings: Settings) -> StateStoreBackend:
@@ -65,7 +69,8 @@ class SQLiteStateStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def get_record(self, page_id: str) -> SyncStateRecord | None:
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -73,18 +78,26 @@ class SQLiteStateStore:
                 FROM sync_state
                 WHERE page_id = ?
                 """,
-                (page_id,),
+                (state_page_id,),
             ).fetchone()
         if row is None:
             return None
-        return SyncStateRecord.model_validate(dict(row))
+        return _record_from_row(dict(row), page_id)
 
-    def list_page_ids(self) -> list[str]:
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT page_id FROM sync_state ORDER BY page_id").fetchall()
-        return [row["page_id"] for row in rows]
+            if mapping_id == "default":
+                rows = conn.execute("SELECT page_id FROM sync_state WHERE page_id NOT LIKE '%:%' ORDER BY page_id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT page_id FROM sync_state WHERE page_id LIKE ? ORDER BY page_id", (f"{mapping_id}:%",)
+                ).fetchall()
+        return [_public_page_id(row["page_id"], mapping_id) for row in rows]
 
-    def upsert_success(self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None) -> None:
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -97,10 +110,11 @@ class SQLiteStateStore:
                     last_synced_at = excluded.last_synced_at,
                     last_error = NULL
                 """,
-                (page_id, event_id, sync_hash, calendar_url, _utc_now_timestamp()),
+                (state_page_id, event_id, sync_hash, calendar_url, _utc_now_timestamp()),
             )
 
-    def upsert_error(self, page_id: str, error_message: str) -> None:
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -109,12 +123,13 @@ class SQLiteStateStore:
                 ON CONFLICT(page_id) DO UPDATE SET
                     last_error = excluded.last_error
                 """,
-                (page_id, error_message[:1900]),
+                (state_page_id, error_message[:1900]),
             )
 
-    def delete_record(self, page_id: str) -> None:
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
-            conn.execute("DELETE FROM sync_state WHERE page_id = ?", (page_id,))
+            conn.execute("DELETE FROM sync_state WHERE page_id = ?", (state_page_id,))
 
     def _initialize(self) -> None:
         with self._connect() as conn:
@@ -136,7 +151,8 @@ class PostgresStateStore:
         self.settings = settings
         self._initialize()
 
-    def get_record(self, page_id: str) -> SyncStateRecord | None:
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -144,18 +160,26 @@ class PostgresStateStore:
                 FROM sync_state
                 WHERE page_id = %s
                 """,
-                (page_id,),
+                (state_page_id,),
             ).fetchone()
         if row is None:
             return None
-        return SyncStateRecord.model_validate(dict(row))
+        return _record_from_row(dict(row), page_id)
 
-    def list_page_ids(self) -> list[str]:
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT page_id FROM sync_state ORDER BY page_id").fetchall()
-        return [row["page_id"] for row in rows]
+            if mapping_id == "default":
+                rows = conn.execute("SELECT page_id FROM sync_state WHERE page_id NOT LIKE '%%:%%' ORDER BY page_id").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT page_id FROM sync_state WHERE page_id LIKE %s ORDER BY page_id", (f"{mapping_id}:%",)
+                ).fetchall()
+        return [_public_page_id(row["page_id"], mapping_id) for row in rows]
 
-    def upsert_success(self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None) -> None:
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -168,10 +192,11 @@ class PostgresStateStore:
                     last_synced_at = excluded.last_synced_at,
                     last_error = NULL
                 """,
-                (page_id, event_id, sync_hash, calendar_url, _utc_now_timestamp()),
+                (state_page_id, event_id, sync_hash, calendar_url, _utc_now_timestamp()),
             )
 
-    def upsert_error(self, page_id: str, error_message: str) -> None:
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
             conn.execute(
                 """
@@ -180,12 +205,13 @@ class PostgresStateStore:
                 ON CONFLICT(page_id) DO UPDATE SET
                     last_error = excluded.last_error
                 """,
-                (page_id, error_message[:1900]),
+                (state_page_id, error_message[:1900]),
             )
 
-    def delete_record(self, page_id: str) -> None:
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
         with self._connect() as conn:
-            conn.execute("DELETE FROM sync_state WHERE page_id = %s", (page_id,))
+            conn.execute("DELETE FROM sync_state WHERE page_id = %s", (state_page_id,))
 
     def _initialize(self) -> None:
         with self._connect() as conn:
@@ -240,3 +266,23 @@ CREATE TABLE IF NOT EXISTS sync_state (
 
 def _utc_now_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _state_page_id(page_id: str, mapping_id: str) -> str:
+    if mapping_id == "default":
+        return page_id
+    return f"{mapping_id}:{page_id}"
+
+
+def _public_page_id(state_page_id: str, mapping_id: str) -> str:
+    if mapping_id == "default":
+        return state_page_id
+    prefix = f"{mapping_id}:"
+    if state_page_id.startswith(prefix):
+        return state_page_id[len(prefix) :]
+    return state_page_id
+
+
+def _record_from_row(row: dict[str, Any], page_id: str) -> SyncStateRecord:
+    row["page_id"] = page_id
+    return SyncStateRecord.model_validate(row)

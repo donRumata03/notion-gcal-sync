@@ -4,7 +4,7 @@ from time import sleep
 from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 
-from app.config import Settings, get_settings
+from app.config import Settings, SyncMapping, get_settings
 from app.exceptions import EventNotFoundError
 from app.hashing import compute_sync_hash
 from app.logging_utils import get_logger
@@ -58,16 +58,19 @@ def sync_page_object(
     gcal_client: GoogleCalendarClientProtocol,
     state_store: SyncStateStore,
     settings: Settings | None = None,
+    mapping: SyncMapping | None = None,
 ) -> SyncResult:
     resolved_settings = settings or get_settings()
-    state = state_store.get_record(page["id"])
+    resolved_mapping = mapping or resolved_settings.resolved_sync_mappings()[0]
+    mapping_id = resolved_mapping.id or "default"
+    state = state_store.get_record(page["id"], mapping_id=mapping_id)
     task = parse_notion_page(
         page,
-        title_property=resolved_settings.notion_prop_title,
-        date_property=resolved_settings.notion_prop_date,
-        status_property=resolved_settings.notion_prop_status,
-        sync_to_calendar_property=resolved_settings.notion_prop_sync_to_calendar,
-        duration_minutes_property=resolved_settings.notion_prop_duration_minutes,
+        title_property=resolved_mapping.title_property,
+        date_property=resolved_mapping.date_property,
+        status_property=resolved_mapping.status_property,
+        sync_to_calendar_property=resolved_mapping.sync_to_calendar_property,
+        duration_minutes_property=resolved_mapping.duration_minutes_property,
         google_event_id=state.event_id if state else None,
         sync_hash=state.sync_hash if state else None,
         last_sync_error=state.last_error if state else None,
@@ -76,6 +79,9 @@ def sync_page_object(
 
     try:
         action = decide_sync_action(task, resolved_settings)
+        if action == "upsert_event" and not page_matches_mapping_filters(page, resolved_mapping):
+            action = "delete_event" if task.google_event_id else "skip_without_event"
+
         if action == "skip_without_event":
             return SyncResult(status="skipped", page_id=task.page_id, event_id=task.google_event_id, message="No sync action required.")
 
@@ -83,7 +89,7 @@ def sync_page_object(
             if not task.google_event_id:
                 return SyncResult(status="skipped", page_id=task.page_id, message="No calendar event to delete.")
             gcal_client.delete_event(task.google_event_id)
-            state_store.delete_record(task.page_id)
+            state_store.delete_record(task.page_id, mapping_id=mapping_id)
             return SyncResult(status="deleted", page_id=task.page_id, event_id=task.google_event_id, message="Calendar event deleted.")
 
         event_body = build_calendar_event(task, resolved_settings)
@@ -96,19 +102,19 @@ def sync_page_object(
             try:
                 result = gcal_client.update_event(task.google_event_id, event_body)
                 _sleep_after_calendar_write(resolved_settings)
-                state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link)
+                state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link, mapping_id=mapping_id)
                 return SyncResult(status="updated", page_id=task.page_id, event_id=result.event_id, message="Calendar event updated.")
             except EventNotFoundError:
                 pass
 
         result = gcal_client.create_event(event_body)
         _sleep_after_calendar_write(resolved_settings)
-        state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link)
+        state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link, mapping_id=mapping_id)
         return SyncResult(status="created", page_id=task.page_id, event_id=result.event_id, message="Calendar event created.")
     except Exception as exc:
         logger.exception("Page sync failed.", extra={"page_id": task.page_id})
         try:
-            state_store.upsert_error(task.page_id, str(exc))
+            state_store.upsert_error(task.page_id, str(exc), mapping_id=mapping_id)
         except Exception:
             logger.exception("Failed to write sync error to local state store.", extra={"page_id": task.page_id})
         return SyncResult(status="error", page_id=task.page_id, event_id=task.google_event_id, error=str(exc))
@@ -120,19 +126,19 @@ def sync_page(
     gcal_client: GoogleCalendarClientProtocol | None = None,
     state_store: SyncStateStore | None = None,
     settings: Settings | None = None,
-) -> SyncResult:
+) -> SyncAllResult:
     resolved_settings = settings or get_settings()
-    resolved_notion_client, resolved_gcal_client, resolved_state_store = _resolve_clients(
-        notion_client, gcal_client, state_store, resolved_settings
-    )
+    resolved_state_store = state_store or SyncStateStore(resolved_settings)
 
     try:
-        page = resolved_notion_client.get_page(page_id)
+        page = (notion_client or _make_default_notion_client(resolved_settings)).get_page(page_id)
     except Exception as exc:
         logger.exception("Failed to retrieve Notion page.", extra={"page_id": page_id})
-        return SyncResult(status="error", page_id=page_id, error=str(exc))
+        result = SyncAllResult(total=1, errors=1)
+        result.results.append(SyncResult(status="error", page_id=page_id, error=str(exc)))
+        return result
 
-    return sync_page_object(page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings)
+    return sync_page_payload(page, notion_client, gcal_client, resolved_state_store, resolved_settings)
 
 
 def sync_page_payload(
@@ -141,12 +147,27 @@ def sync_page_payload(
     gcal_client: GoogleCalendarClientProtocol | None = None,
     state_store: SyncStateStore | None = None,
     settings: Settings | None = None,
-) -> SyncResult:
+) -> SyncAllResult:
     resolved_settings = settings or get_settings()
-    resolved_notion_client, resolved_gcal_client, resolved_state_store = _resolve_clients(
-        notion_client, gcal_client, state_store, resolved_settings
-    )
-    return sync_page_object(page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings)
+    resolved_state_store = state_store or SyncStateStore(resolved_settings)
+    result = SyncAllResult()
+    mappings = mappings_for_page(page, resolved_settings)
+    result.total = len(mappings)
+
+    if not mappings:
+        result.skipped = 1
+        result.results.append(SyncResult(status="skipped", page_id=page.get("id", "unknown"), message="No mapping matches page parent."))
+        return result
+
+    for mapping in mappings:
+        resolved_notion_client, resolved_gcal_client, _ = _resolve_clients(
+            notion_client, gcal_client, resolved_state_store, resolved_settings, mapping
+        )
+        sync_result = sync_page_object(
+            page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings, mapping
+        )
+        _add_sync_result(result, sync_result)
+    return result
 
 
 def sync_all(
@@ -156,41 +177,33 @@ def sync_all(
     settings: Settings | None = None,
 ) -> SyncAllResult:
     resolved_settings = settings or get_settings()
-    resolved_notion_client, resolved_gcal_client, resolved_state_store = _resolve_clients(
-        notion_client, gcal_client, state_store, resolved_settings
-    )
-
     result = SyncAllResult()
-    live_pages = resolved_notion_client.query_database_for_sync_candidates()
-    pages_by_id = {page["id"]: page for page in live_pages}
-    for tracked_page_id in resolved_state_store.list_page_ids():
-        if tracked_page_id not in pages_by_id:
-            pages_by_id[tracked_page_id] = resolved_notion_client.get_page(tracked_page_id)
+    resolved_state_store = state_store or SyncStateStore(resolved_settings)
 
-    pages = list(pages_by_id.values())
-    result.total = len(pages)
+    for mapping in resolved_settings.resolved_sync_mappings():
+        resolved_notion_client, resolved_gcal_client, _ = _resolve_clients(
+            notion_client, gcal_client, resolved_state_store, resolved_settings, mapping
+        )
+        live_pages = resolved_notion_client.query_database_for_sync_candidates()
+        pages_by_id = {page["id"]: page for page in live_pages}
+        mapping_id = mapping.id or "default"
+        for tracked_page_id in resolved_state_store.list_page_ids(mapping_id=mapping_id):
+            if tracked_page_id not in pages_by_id:
+                pages_by_id[tracked_page_id] = resolved_notion_client.get_page(tracked_page_id)
 
-    for page in pages:
-        try:
-            sync_result = sync_page_object(page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings)
-        except Exception as exc:
-            page_id = page.get("id", "unknown")
-            logger.exception("Unhandled exception during page sync.", extra={"page_id": page_id})
-            sync_result = SyncResult(status="error", page_id=page_id, error=str(exc))
-        result.results.append(sync_result)
+        pages = list(pages_by_id.values())
+        result.total += len(pages)
 
-        if sync_result.status == "created":
-            result.created += 1
-        elif sync_result.status == "updated":
-            result.updated += 1
-        elif sync_result.status == "deleted":
-            result.deleted += 1
-        elif sync_result.status == "unchanged":
-            result.unchanged += 1
-        elif sync_result.status == "skipped":
-            result.skipped += 1
-        elif sync_result.status == "error":
-            result.errors += 1
+        for page in pages:
+            try:
+                sync_result = sync_page_object(
+                    page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings, mapping
+                )
+            except Exception as exc:
+                page_id = page.get("id", "unknown")
+                logger.exception("Unhandled exception during page sync.", extra={"page_id": page_id})
+                sync_result = SyncResult(status="error", page_id=page_id, error=str(exc))
+            _add_sync_result(result, sync_result)
 
     return result
 
@@ -293,20 +306,94 @@ def _looks_like_full_page_payload(value: dict[str, Any]) -> bool:
     return _is_page_object(value) and isinstance(value.get("properties"), dict)
 
 
+def mappings_for_page(page: dict[str, Any], settings: Settings) -> list[SyncMapping]:
+    page_database_id = _page_database_id(page)
+    page_data_source_id = _page_data_source_id(page)
+    if not page_database_id and not page_data_source_id:
+        return settings.resolved_sync_mappings()
+
+    return [
+        mapping
+        for mapping in settings.resolved_sync_mappings()
+        if _normalize_notion_id(mapping.notion_database_id)
+        in {_normalize_notion_id(page_database_id), _normalize_notion_id(page_data_source_id)}
+    ]
+
+
+def page_matches_mapping_filters(page: dict[str, Any], mapping: SyncMapping) -> bool:
+    properties = page.get("properties")
+    if not isinstance(properties, dict):
+        return False
+    for mapping_filter in mapping.filters:
+        prop = properties.get(mapping_filter.property)
+        if not isinstance(prop, dict):
+            return False
+        if mapping_filter.type == "status_not_in":
+            status = prop.get("status")
+            status_name = status.get("name") if isinstance(status, dict) else None
+            if status_name in mapping_filter.values:
+                return False
+    return True
+
+
+def _page_database_id(page: dict[str, Any]) -> str | None:
+    parent = page.get("parent")
+    if not isinstance(parent, dict):
+        return None
+    value = parent.get("database_id")
+    return value if isinstance(value, str) else None
+
+
+def _page_data_source_id(page: dict[str, Any]) -> str | None:
+    parent = page.get("parent")
+    if not isinstance(parent, dict):
+        return None
+    value = parent.get("data_source_id")
+    return value if isinstance(value, str) else None
+
+
+def _normalize_notion_id(value: str | None) -> str:
+    return (value or "").replace("-", "").lower()
+
+
+def _add_sync_result(result: SyncAllResult, sync_result: SyncResult) -> None:
+    result.results.append(sync_result)
+    if sync_result.status == "created":
+        result.created += 1
+    elif sync_result.status == "updated":
+        result.updated += 1
+    elif sync_result.status == "deleted":
+        result.deleted += 1
+    elif sync_result.status == "unchanged":
+        result.unchanged += 1
+    elif sync_result.status == "skipped":
+        result.skipped += 1
+    elif sync_result.status == "error":
+        result.errors += 1
+
+
 def _resolve_clients(
     notion_client: NotionClientProtocol | None,
     gcal_client: GoogleCalendarClientProtocol | None,
     state_store: SyncStateStore | None,
     settings: Settings,
+    mapping: SyncMapping | None = None,
 ) -> tuple[NotionClientProtocol, GoogleCalendarClientProtocol, SyncStateStore]:
+    resolved_mapping = mapping or settings.resolved_sync_mappings()[0]
     if notion_client is None:
         from app.notion_client import NotionAPIClient
 
-        notion_client = NotionAPIClient(settings)
+        notion_client = NotionAPIClient(settings, resolved_mapping)
     if gcal_client is None:
         from app.gcal_client import GoogleCalendarClient
 
-        gcal_client = GoogleCalendarClient(settings)
+        gcal_client = GoogleCalendarClient(settings, resolved_mapping.google_calendar_id)
     if state_store is None:
         state_store = SyncStateStore(settings)
     return notion_client, gcal_client, state_store
+
+
+def _make_default_notion_client(settings: Settings) -> NotionClientProtocol:
+    from app.notion_client import NotionAPIClient
+
+    return NotionAPIClient(settings, settings.resolved_sync_mappings()[0])

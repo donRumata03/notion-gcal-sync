@@ -3,11 +3,36 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DoneBehavior = Literal["delete", "keep", "mark_done"]
+
+
+class MappingFilter(BaseModel):
+    property: str
+    type: Literal["status_not_in"] = "status_not_in"
+    values: list[str]
+
+
+class SyncMapping(BaseModel):
+    id: str | None = None
+    notion_database_id: str | None = None
+    notion_database_ids: list[str] | None = None
+    google_calendar_id: str
+    title_property: str = "Name"
+    date_property: str = "Date/time"
+    status_property: str | None = "Status"
+    sync_to_calendar_property: str | None = None
+    duration_minutes_property: str | None = None
+    filters: list[MappingFilter] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_database_ids(self) -> "SyncMapping":
+        if not self.notion_database_id and not self.notion_database_ids:
+            raise ValueError("Set notion_database_id or notion_database_ids.")
+        return self
 
 
 class Settings(BaseSettings):
@@ -45,6 +70,7 @@ class Settings(BaseSettings):
     notion_prop_status: str = Field(default="Status", alias="NOTION_PROP_STATUS")
     notion_prop_sync_to_calendar: str | None = Field(default=None, alias="NOTION_PROP_SYNC_TO_CALENDAR")
     notion_prop_duration_minutes: str | None = Field(default=None, alias="NOTION_PROP_DURATION_MINUTES")
+    sync_mappings: list[SyncMapping] | None = Field(default=None, alias="SYNC_MAPPINGS")
 
     @model_validator(mode="after")
     def resolve_google_oauth_client(self) -> "Settings":
@@ -70,7 +96,50 @@ class Settings(BaseSettings):
         self.google_client_secret = client_secret
         return self
 
+    def resolved_sync_mappings(self) -> list[SyncMapping]:
+        if self.sync_mappings:
+            return [
+                expanded_mapping
+                for index, mapping in enumerate(self.sync_mappings)
+                for expanded_mapping in _expand_mapping(_with_mapping_id(mapping, index))
+            ]
+
+        return [
+            SyncMapping(
+                id="default",
+                notion_database_id=self.notion_database_id,
+                google_calendar_id=self.google_calendar_id,
+                title_property=self.notion_prop_title,
+                date_property=self.notion_prop_date,
+                status_property=self.notion_prop_status,
+                sync_to_calendar_property=self.notion_prop_sync_to_calendar,
+                duration_minutes_property=self.notion_prop_duration_minutes,
+            )
+        ]
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     return Settings()
+
+
+def _with_mapping_id(mapping: SyncMapping, index: int) -> SyncMapping:
+    if mapping.id:
+        return mapping
+    return mapping.model_copy(update={"id": f"mapping-{index + 1}"})
+
+
+def _expand_mapping(mapping: SyncMapping) -> list[SyncMapping]:
+    database_ids = mapping.notion_database_ids or ([mapping.notion_database_id] if mapping.notion_database_id else [])
+    if len(database_ids) <= 1:
+        return [mapping.model_copy(update={"notion_database_id": database_ids[0], "notion_database_ids": None})]
+    return [
+        mapping.model_copy(
+            update={
+                "id": f"{mapping.id}-{index + 1}",
+                "notion_database_id": database_id,
+                "notion_database_ids": None,
+            }
+        )
+        for index, database_id in enumerate(database_ids)
+    ]
