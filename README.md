@@ -68,7 +68,7 @@ Example:
     "title_property": "Name",
     "date_property": "Deadline",
     "filters": [
-      {"property": "Done?!", "type": "status_not_in", "values": ["Done", "Completed", "Complete"]}
+      {"property": "Done?!", "type": "status_not_in", "values": ["Done", "Complete"]}
     ]
   }
 ]

@@ -91,10 +91,26 @@ class NotionAPIClient:
         for mapping_filter in self.mapping.filters:
             if mapping_filter.type == "status_not_in":
                 for value in mapping_filter.values:
+                    if value not in self._status_options(mapping_filter.property):
+                        logger.warning(
+                            "Skipping unknown status filter value.",
+                            extra={"property": mapping_filter.property, "value": value},
+                        )
+                        continue
                     filters.append({"property": mapping_filter.property, "status": {"does_not_equal": value}})
         if len(filters) == 1:
             return filters[0]
         return {"and": filters}
+
+    def _status_options(self, property_name: str) -> set[str]:
+        prop = self.schema.get(property_name, {})
+        status = prop.get("status")
+        if not isinstance(status, dict):
+            return set()
+        options = status.get("options")
+        if not isinstance(options, list):
+            return set()
+        return {option["name"] for option in options if isinstance(option, dict) and isinstance(option.get("name"), str)}
 
 
 __all__ = [
