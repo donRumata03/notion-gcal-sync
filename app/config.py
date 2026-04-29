@@ -8,6 +8,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 DoneBehavior = Literal["delete", "keep", "mark_done"]
+StateBackend = Literal["auto", "sqlite", "firestore", "postgres"]
 
 
 class MappingFilter(BaseModel):
@@ -58,7 +59,11 @@ class Settings(BaseSettings):
     sync_max_pages: int = Field(default=100, alias="SYNC_MAX_PAGES")
     sync_calendar_write_delay_seconds: float = Field(default=0.2, alias="SYNC_CALENDAR_WRITE_DELAY_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    state_backend: StateBackend = Field(default="auto", alias="STATE_BACKEND")
     state_db_path: str = Field(default="./data/sync-state.sqlite3", alias="STATE_DB_PATH")
+    firestore_project_id: str | None = Field(default=None, alias="FIRESTORE_PROJECT_ID")
+    firestore_database: str | None = Field(default=None, alias="FIRESTORE_DATABASE")
+    firestore_collection: str = Field(default="sync_state", alias="FIRESTORE_COLLECTION")
     state_database_url: str | None = Field(default=None, alias="STATE_DATABASE_URL")
     cloud_sql_connection_name: str | None = Field(default=None, alias="CLOUD_SQL_CONNECTION_NAME")
     cloud_sql_database: str | None = Field(default=None, alias="CLOUD_SQL_DATABASE")

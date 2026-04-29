@@ -89,20 +89,20 @@ Configure the same webhook URL for every Notion database used in `SYNC_MAPPINGS`
 ## State Storage
 Local default:
 ```text
+STATE_BACKEND=sqlite
 STATE_DB_PATH=./data/sync-state.sqlite3
 ```
 
-Cloud Run production setup should use Cloud SQL for PostgreSQL:
+Cloud Run production setup uses Firestore:
 ```text
-CLOUD_SQL_CONNECTION_NAME=project:region:instance
-CLOUD_SQL_DATABASE=notion_gcal_sync
-CLOUD_SQL_USER=sync_user
-CLOUD_SQL_PASSWORD=...
+STATE_BACKEND=firestore
+FIRESTORE_PROJECT_ID=calendar-sync-494800
+FIRESTORE_COLLECTION=sync_state
 ```
 
-The app creates the `sync_state` table automatically.
+The app stores one document per mapping-aware Notion page key. The document keeps the public Notion page id, mapping id, Google Calendar event id, sync hash, calendar URL, last sync timestamp, and last error.
 
-For local Postgres or Cloud SQL Auth Proxy:
+Legacy Postgres/Cloud SQL remains available for migration or rollback only:
 ```text
 STATE_DATABASE_URL=postgresql://sync_user:password@127.0.0.1:5432/notion_gcal_sync
 ```
@@ -113,8 +113,6 @@ Use Secret Manager for:
 - `GOOGLE_REFRESH_TOKEN`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `CLOUD_SQL_USER`
-- `CLOUD_SQL_PASSWORD`
 - `NOTION_WEBHOOK_SECRET` only if your webhook sender signs requests with `X-Notion-Signature`
 
-Use normal Cloud Run env vars for non-secret config such as `SYNC_MAPPINGS`, `APP_TIMEZONE`, and `SYNC_MAX_PAGES`.
+Use normal Cloud Run env vars for non-secret config such as `STATE_BACKEND`, `FIRESTORE_PROJECT_ID`, `FIRESTORE_COLLECTION`, `SYNC_MAPPINGS`, `APP_TIMEZONE`, and `SYNC_MAX_PAGES`.

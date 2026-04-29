@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from base64 import urlsafe_b64encode
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,6 +59,15 @@ class SyncStateStore:
 
 
 def create_state_store_backend(settings: Settings) -> StateStoreBackend:
+    if settings.state_backend == "sqlite":
+        return SQLiteStateStore(settings)
+    if settings.state_backend == "firestore":
+        return FirestoreStateStore(settings)
+    if settings.state_backend == "postgres":
+        return PostgresStateStore(settings)
+
+    if settings.firestore_project_id:
+        return FirestoreStateStore(settings)
     if settings.state_database_url or settings.cloud_sql_connection_name:
         return PostgresStateStore(settings)
     return SQLiteStateStore(settings)
@@ -252,6 +262,72 @@ class PostgresStateStore:
         }
 
 
+class FirestoreStateStore:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.collection_name = settings.firestore_collection
+        self._client = self._make_client(settings)
+        self._collection = self._client.collection(self.collection_name)
+
+    def get_record(self, page_id: str, mapping_id: str = "default") -> SyncStateRecord | None:
+        state_page_id = _state_page_id(page_id, mapping_id)
+        snapshot = self._collection.document(_firestore_doc_id(state_page_id)).get()
+        if not snapshot.exists:
+            return None
+        row = snapshot.to_dict() or {}
+        return _record_from_row(row, page_id)
+
+    def list_page_ids(self, mapping_id: str = "default") -> list[str]:
+        snapshots = self._collection.where("mapping_id", "==", mapping_id).stream()
+        state_page_ids = sorted((snapshot.to_dict() or {}).get("state_page_id", "") for snapshot in snapshots)
+        return [_public_page_id(state_page_id, mapping_id) for state_page_id in state_page_ids if state_page_id]
+
+    def upsert_success(
+        self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
+    ) -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
+        self._collection.document(_firestore_doc_id(state_page_id)).set(
+            {
+                "page_id": page_id,
+                "state_page_id": state_page_id,
+                "mapping_id": mapping_id,
+                "event_id": event_id,
+                "sync_hash": sync_hash,
+                "calendar_url": calendar_url,
+                "last_synced_at": _utc_now_timestamp(),
+                "last_error": None,
+            },
+            merge=True,
+        )
+
+    def upsert_error(self, page_id: str, error_message: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
+        self._collection.document(_firestore_doc_id(state_page_id)).set(
+            {
+                "page_id": page_id,
+                "state_page_id": state_page_id,
+                "mapping_id": mapping_id,
+                "event_id": "",
+                "last_error": error_message[:1900],
+            },
+            merge=True,
+        )
+
+    def delete_record(self, page_id: str, mapping_id: str = "default") -> None:
+        state_page_id = _state_page_id(page_id, mapping_id)
+        self._collection.document(_firestore_doc_id(state_page_id)).delete()
+
+    def _make_client(self, settings: Settings) -> Any:
+        from google.cloud import firestore
+
+        kwargs = {}
+        if settings.firestore_project_id:
+            kwargs["project"] = settings.firestore_project_id
+        if settings.firestore_database:
+            kwargs["database"] = settings.firestore_database
+        return firestore.Client(**kwargs)
+
+
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS sync_state (
     page_id TEXT PRIMARY KEY,
@@ -286,3 +362,7 @@ def _public_page_id(state_page_id: str, mapping_id: str) -> str:
 def _record_from_row(row: dict[str, Any], page_id: str) -> SyncStateRecord:
     row["page_id"] = page_id
     return SyncStateRecord.model_validate(row)
+
+
+def _firestore_doc_id(state_page_id: str) -> str:
+    return urlsafe_b64encode(state_page_id.encode("utf-8")).decode("ascii").rstrip("=")
