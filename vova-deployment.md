@@ -9,6 +9,7 @@ Ugly operational note. Do not put secret values here.
 - Cloud Run service name: `notion-gcall-sync`
 - Latest deployed revision when this note was written: `notion-gcall-sync-00016-qf9`
 - Runtime: Python app in Docker, started with `uv run uvicorn app.main:app`
+- Cloud Run limits: 1 vCPU, 512 MiB RAM, max scale 3, no minimum instances configured
 - Current storage backend: Cloud SQL for sync state
 - Webhook endpoint: configured in Notion automations, exact URL intentionally omitted here
 
