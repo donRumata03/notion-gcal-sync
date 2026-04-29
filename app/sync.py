@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from time import sleep
 from datetime import date, datetime, time, timedelta
 from typing import Any, Protocol
 
@@ -94,15 +95,18 @@ def sync_page_object(
         if task.google_event_id:
             try:
                 result = gcal_client.update_event(task.google_event_id, event_body)
+                _sleep_after_calendar_write(resolved_settings)
                 state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link)
                 return SyncResult(status="updated", page_id=task.page_id, event_id=result.event_id, message="Calendar event updated.")
             except EventNotFoundError:
                 pass
 
         result = gcal_client.create_event(event_body)
+        _sleep_after_calendar_write(resolved_settings)
         state_store.upsert_success(task.page_id, result.event_id, new_hash, result.html_link)
         return SyncResult(status="created", page_id=task.page_id, event_id=result.event_id, message="Calendar event created.")
     except Exception as exc:
+        logger.exception("Page sync failed.", extra={"page_id": task.page_id})
         try:
             state_store.upsert_error(task.page_id, str(exc))
         except Exception:
@@ -274,6 +278,11 @@ def _coerce_datetime(value: date | datetime) -> datetime:
     if isinstance(value, datetime):
         return value
     return datetime.combine(value, time.min)
+
+
+def _sleep_after_calendar_write(settings: Settings) -> None:
+    if settings.sync_calendar_write_delay_seconds > 0:
+        sleep(settings.sync_calendar_write_delay_seconds)
 
 
 def _is_page_object(value: dict[str, Any]) -> bool:

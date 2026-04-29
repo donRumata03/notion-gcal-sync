@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     sync_done_behavior: DoneBehavior = Field(default="delete", alias="SYNC_DONE_BEHAVIOR")
     sync_default_event_minutes: int = Field(default=30, alias="SYNC_DEFAULT_EVENT_MINUTES")
     sync_max_pages: int = Field(default=100, alias="SYNC_MAX_PAGES")
+    sync_calendar_write_delay_seconds: float = Field(default=0.2, alias="SYNC_CALENDAR_WRITE_DELAY_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     state_db_path: str = Field(default="./data/sync-state.sqlite3", alias="STATE_DB_PATH")
     state_database_url: str | None = Field(default=None, alias="STATE_DATABASE_URL")
