@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     sync_default_event_minutes: int = Field(default=30, alias="SYNC_DEFAULT_EVENT_MINUTES")
     sync_max_pages: int = Field(default=100, alias="SYNC_MAX_PAGES")
     sync_calendar_write_delay_seconds: float = Field(default=0.2, alias="SYNC_CALENDAR_WRITE_DELAY_SECONDS")
+    sync_repair_page_delay_seconds: float = Field(default=1.0, alias="SYNC_REPAIR_PAGE_DELAY_SECONDS")
+    sync_recent_lookback_days: int = Field(default=3, alias="SYNC_RECENT_LOOKBACK_DAYS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     state_backend: StateBackend = Field(default="auto", alias="STATE_BACKEND")
     state_db_path: str = Field(default="./data/sync-state.sqlite3", alias="STATE_DB_PATH")

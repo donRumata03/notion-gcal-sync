@@ -29,6 +29,15 @@ curl -X POST http://127.0.0.1:8000/sync-all
 
 `/sync-all` handles pre-existing pages. Webhooks handle later edits.
 
+Trigger repair syncs:
+```bash
+curl -X POST http://127.0.0.1:8000/sync-errors
+curl -X POST http://127.0.0.1:8000/sync-recent
+```
+
+- `/sync-errors` retries only pages whose last sync ended in error.
+- `/sync-recent` rechecks recent Notion pages with dates on or after the configured lookback window.
+
 ## Basic Config
 Required:
 - `NOTION_TOKEN`
@@ -86,6 +95,20 @@ If the webhook contains a full page object, the app syncs from that payload. If 
 
 Configure the same webhook URL for every Notion database used in `SYNC_MAPPINGS`.
 
+Webhook-triggered event lookup uses only the exact Google Calendar private extended property:
+- `extendedProperties.private.notionPageId=<hyphenated notion page id>`
+
+Legacy fallback searches by normalized page ID or event description are intentionally disabled to reduce Calendar API load and rate-limit pressure.
+
+## Repair Jobs
+
+Recommended production schedule:
+- every 30 minutes: `POST /sync-errors`
+- every 2 hours: `POST /sync-recent`
+
+`/sync-recent` checks pages whose configured Notion date property is on or after `today - SYNC_RECENT_LOOKBACK_DAYS`.
+It sleeps `SYNC_REPAIR_PAGE_DELAY_SECONDS` between pages to reduce Calendar API burst pressure.
+
 ## State Storage
 Local default:
 ```text
@@ -116,3 +139,7 @@ Use Secret Manager for:
 - `NOTION_WEBHOOK_SECRET` only if your webhook sender signs requests with `X-Notion-Signature`
 
 Use normal Cloud Run env vars for non-secret config such as `STATE_BACKEND`, `FIRESTORE_PROJECT_ID`, `FIRESTORE_COLLECTION`, `SYNC_MAPPINGS`, `APP_TIMEZONE`, and `SYNC_MAX_PAGES`.
+
+Useful optional repair env vars:
+- `SYNC_REPAIR_PAGE_DELAY_SECONDS` default `1.0`
+- `SYNC_RECENT_LOOKBACK_DAYS` default `3`

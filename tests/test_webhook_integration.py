@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.main import app
 import app.main as main_module
+from app.models import SyncAllResult, SyncResult
 from app.sync import extract_page_ids_from_webhook, extract_page_payloads_from_webhook
 
 
@@ -83,3 +84,44 @@ def test_notion_webhook_processes_inline_page_payload(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"ok": True, "queued_pages": 1}
     assert received_page_ids == ["3512d7fd-cb12-807d-b021-d75e56e170e3"]
+
+
+def test_notion_webhook_logs_queued_inline_page_sync(monkeypatch) -> None:
+    log_messages: list[str] = []
+
+    def fake_info(message: str, *args: object, **kwargs: object) -> None:
+        del kwargs
+        log_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(main_module, "get_settings", _settings)
+    monkeypatch.setattr(main_module.logger, "info", fake_info)
+    monkeypatch.setattr(main_module, "_background_sync_page", lambda page_id: (_ for _ in ()).throw(AssertionError(page_id)))
+    monkeypatch.setattr(main_module, "_background_sync_all", lambda: (_ for _ in ()).throw(AssertionError("sync_all should not run")))
+    monkeypatch.setattr(main_module, "_background_sync_page_payload", lambda page: None)
+
+    client = TestClient(app)
+    response = client.post("/notion-webhook", json=deepcopy(SAMPLE_WEBHOOK_PAYLOAD))
+
+    assert response.status_code == 200
+    assert any("Received Notion webhook." in message for message in log_messages)
+    assert any("Queueing webhook inline page sync." in message for message in log_messages)
+
+
+def test_background_sync_page_payload_logs_result(monkeypatch) -> None:
+    log_messages: list[str] = []
+
+    def fake_info(message: str, *args: object, **kwargs: object) -> None:
+        del kwargs
+        log_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(main_module.logger, "info", fake_info)
+    monkeypatch.setattr(
+        main_module,
+        "sync_page_payload",
+        lambda page: SyncAllResult(total=1, created=1, results=[SyncResult(status="created", page_id=page["id"], event_id="evt-1")]),
+    )
+
+    main_module._background_sync_page_payload({"id": "page-1"})
+
+    assert any("Background sync_page_payload finished." in message for message in log_messages)
+    assert any("'page_id': 'page-1'" in message for message in log_messages)

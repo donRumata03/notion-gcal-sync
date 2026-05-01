@@ -7,7 +7,7 @@ Ugly operational note. Do not put secret values here.
 - GCP project id: `calendar-sync-494800`
 - Region: `europe-west1`
 - Cloud Run service name: `notion-gcall-sync`
-- Latest deployed revision when this note was written: `notion-gcall-sync-00020-6q4`
+- Latest deployed revision when this note was written: `notion-gcall-sync-00022-psz`
 - Runtime: Python app in Docker, started with `uv run uvicorn app.main:app`
 - Cloud Run limits: 1 vCPU, 512 MiB RAM, max scale 3, no minimum instances configured
 - Current storage backend: Firestore for sync state
@@ -44,6 +44,8 @@ Runtime env/config names:
 - `FIRESTORE_COLLECTION=sync_state`
 - `APP_TIMEZONE`
 - `LOG_LEVEL`
+- `SYNC_REPAIR_PAGE_DELAY_SECONDS`
+- `SYNC_RECENT_LOOKBACK_DAYS`
 
 Local-only credential/config files:
 
@@ -82,7 +84,7 @@ On this Windows machine, `gcloud` may need the full path:
 C:\Users\Vova\AppData\Local\Google\Cloud SDK\google-cloud-sdk\bin\gcloud.cmd
 ```
 
-## Duplicate handling
+## Duplicate handling and repair
 
 Google Calendar events store the Notion page id in:
 
@@ -90,7 +92,15 @@ Google Calendar events store the Notion page id in:
 extendedProperties.private.notionPageId
 ```
 
-The app also stores sync state in Firestore. Current code checks Google Calendar by `notionPageId` before creating an event, so missing local state should not create another duplicate for the same page. If several matching events already exist, the sync keeps one and deletes the extra matches.
+The app also stores sync state in Firestore. Current code checks Google Calendar only by the exact private extended property `notionPageId` before creating or updating an event. Legacy fallback searches by normalized page ID or description were removed to reduce Calendar API load and rate-limit pressure.
+
+Recommended Cloud Scheduler jobs:
+
+- every 30 minutes: `POST /sync-errors`
+- every 2 hours: `POST /sync-recent`
+
+`/sync-errors` retries only state-store records with `last_error`.
+`/sync-recent` rechecks Notion pages whose configured date property is on or after `today - SYNC_RECENT_LOOKBACK_DAYS`, with `SYNC_REPAIR_PAGE_DELAY_SECONDS` of spacing between pages.
 
 ## Cost note
 

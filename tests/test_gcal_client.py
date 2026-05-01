@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from googleapiclient.errors import HttpError
 
-from app.gcal_client import _execute_with_retries, _is_retryable_http_error
+from app.gcal_client import GoogleCalendarClient, _execute_with_retries, _is_retryable_http_error
 
 
 class _Response(dict):
@@ -39,3 +39,19 @@ def test_execute_with_retries_retries_then_succeeds(monkeypatch) -> None:
 
     assert _execute_with_retries(operation, max_attempts=3) == "ok"
     assert calls["count"] == 3
+
+
+def test_find_events_by_notion_page_id_only_uses_exact_extended_property() -> None:
+    client = object.__new__(GoogleCalendarClient)
+    calls: list[dict[str, str]] = []
+
+    def fake_list_events(**params: str) -> list[dict]:
+        calls.append(params)
+        return [{"id": "evt-1", "htmlLink": "https://calendar.test/e/evt-1"}]
+
+    client._list_events = fake_list_events  # type: ignore[attr-defined]
+
+    events = client.find_events_by_notion_page_id("page-1")
+
+    assert [event.event_id for event in events] == ["evt-1"]
+    assert calls == [{"privateExtendedProperty": "notionPageId=page-1"}]

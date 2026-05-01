@@ -26,6 +26,8 @@ class StateStoreBackend(Protocol):
 
     def list_page_ids(self, mapping_id: str = "default") -> list[str]: ...
 
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]: ...
+
     def upsert_success(
         self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
     ) -> None: ...
@@ -45,6 +47,9 @@ class SyncStateStore:
 
     def list_page_ids(self, mapping_id: str = "default") -> list[str]:
         return self.backend.list_page_ids(mapping_id)
+
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]:
+        return self.backend.list_error_page_ids(mapping_id)
 
     def upsert_success(
         self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
@@ -101,6 +106,27 @@ class SQLiteStateStore:
             else:
                 rows = conn.execute(
                     "SELECT page_id FROM sync_state WHERE page_id LIKE ? ORDER BY page_id", (f"{mapping_id}:%",)
+                ).fetchall()
+        return [_public_page_id(row["page_id"], mapping_id) for row in rows]
+
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]:
+        with self._connect() as conn:
+            if mapping_id == "default":
+                rows = conn.execute(
+                    """
+                    SELECT page_id FROM sync_state
+                    WHERE page_id NOT LIKE '%:%' AND last_error IS NOT NULL AND last_error <> ''
+                    ORDER BY page_id
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT page_id FROM sync_state
+                    WHERE page_id LIKE ? AND last_error IS NOT NULL AND last_error <> ''
+                    ORDER BY page_id
+                    """,
+                    (f"{mapping_id}:%",),
                 ).fetchall()
         return [_public_page_id(row["page_id"], mapping_id) for row in rows]
 
@@ -183,6 +209,27 @@ class PostgresStateStore:
             else:
                 rows = conn.execute(
                     "SELECT page_id FROM sync_state WHERE page_id LIKE %s ORDER BY page_id", (f"{mapping_id}:%",)
+                ).fetchall()
+        return [_public_page_id(row["page_id"], mapping_id) for row in rows]
+
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]:
+        with self._connect() as conn:
+            if mapping_id == "default":
+                rows = conn.execute(
+                    """
+                    SELECT page_id FROM sync_state
+                    WHERE page_id NOT LIKE '%%:%%' AND last_error IS NOT NULL AND last_error <> ''
+                    ORDER BY page_id
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT page_id FROM sync_state
+                    WHERE page_id LIKE %s AND last_error IS NOT NULL AND last_error <> ''
+                    ORDER BY page_id
+                    """,
+                    (f"{mapping_id}:%",),
                 ).fetchall()
         return [_public_page_id(row["page_id"], mapping_id) for row in rows]
 
@@ -280,6 +327,15 @@ class FirestoreStateStore:
     def list_page_ids(self, mapping_id: str = "default") -> list[str]:
         snapshots = self._collection.where("mapping_id", "==", mapping_id).stream()
         state_page_ids = sorted((snapshot.to_dict() or {}).get("state_page_id", "") for snapshot in snapshots)
+        return [_public_page_id(state_page_id, mapping_id) for state_page_id in state_page_ids if state_page_id]
+
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]:
+        snapshots = self._collection.where("mapping_id", "==", mapping_id).stream()
+        state_page_ids = sorted(
+            (snapshot.to_dict() or {}).get("state_page_id", "")
+            for snapshot in snapshots
+            if (snapshot.to_dict() or {}).get("last_error")
+        )
         return [_public_page_id(state_page_id, mapping_id) for state_page_id in state_page_ids if state_page_id]
 
     def upsert_success(

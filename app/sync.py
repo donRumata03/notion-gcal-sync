@@ -20,6 +20,8 @@ class NotionClientProtocol(Protocol):
 
     def query_database_for_sync_candidates(self) -> list[dict[str, Any]]: ...
 
+    def query_database_for_recent_candidates(self, start_on_or_after: date) -> list[dict[str, Any]]: ...
+
 
 class GoogleCalendarClientProtocol(Protocol):
     def create_event(self, event_body: dict[str, Any]) -> CalendarEventResult: ...
@@ -244,6 +246,72 @@ def sync_all(
     return result
 
 
+def sync_error_pages(
+    notion_client: NotionClientProtocol | None = None,
+    gcal_client: GoogleCalendarClientProtocol | None = None,
+    state_store: SyncStateStore | None = None,
+    settings: Settings | None = None,
+) -> SyncAllResult:
+    resolved_settings = settings or get_settings()
+    result = SyncAllResult()
+    resolved_state_store = state_store or SyncStateStore(resolved_settings)
+
+    for mapping in resolved_settings.resolved_sync_mappings():
+        resolved_notion_client, resolved_gcal_client, _ = _resolve_clients(
+            notion_client, gcal_client, resolved_state_store, resolved_settings, mapping
+        )
+        mapping_id = mapping.id or "default"
+        page_ids = resolved_state_store.list_error_page_ids(mapping_id=mapping_id)
+        result.total += len(page_ids)
+
+        for index, page_id in enumerate(page_ids):
+            try:
+                page = resolved_notion_client.get_page(page_id)
+                sync_result = sync_page_object(
+                    page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings, mapping
+                )
+            except Exception as exc:
+                logger.exception("Unhandled exception during error-page sync.", extra={"page_id": page_id})
+                sync_result = SyncResult(status="error", page_id=page_id, error=str(exc))
+            _add_sync_result(result, sync_result)
+            _sleep_between_repair_pages(resolved_settings, has_more=index < len(page_ids) - 1)
+
+    return result
+
+
+def sync_recent_pages(
+    notion_client: NotionClientProtocol | None = None,
+    gcal_client: GoogleCalendarClientProtocol | None = None,
+    state_store: SyncStateStore | None = None,
+    settings: Settings | None = None,
+) -> SyncAllResult:
+    resolved_settings = settings or get_settings()
+    result = SyncAllResult()
+    resolved_state_store = state_store or SyncStateStore(resolved_settings)
+    cutoff_date = _recent_sync_cutoff_date(resolved_settings)
+
+    for mapping in resolved_settings.resolved_sync_mappings():
+        resolved_notion_client, resolved_gcal_client, _ = _resolve_clients(
+            notion_client, gcal_client, resolved_state_store, resolved_settings, mapping
+        )
+        pages = resolved_notion_client.query_database_for_recent_candidates(cutoff_date)
+        result.total += len(pages)
+
+        for index, page in enumerate(pages):
+            try:
+                sync_result = sync_page_object(
+                    page, resolved_notion_client, resolved_gcal_client, resolved_state_store, resolved_settings, mapping
+                )
+            except Exception as exc:
+                page_id = page.get("id", "unknown")
+                logger.exception("Unhandled exception during recent-page sync.", extra={"page_id": page_id})
+                sync_result = SyncResult(status="error", page_id=page_id, error=str(exc))
+            _add_sync_result(result, sync_result)
+            _sleep_between_repair_pages(resolved_settings, has_more=index < len(pages) - 1)
+
+    return result
+
+
 def extract_page_ids_from_webhook(payload: dict[str, Any]) -> set[str]:
     page_ids: set[str] = set()
 
@@ -332,6 +400,15 @@ def _coerce_datetime(value: date | datetime) -> datetime:
 def _sleep_after_calendar_write(settings: Settings) -> None:
     if settings.sync_calendar_write_delay_seconds > 0:
         sleep(settings.sync_calendar_write_delay_seconds)
+
+
+def _sleep_between_repair_pages(settings: Settings, has_more: bool) -> None:
+    if has_more and settings.sync_repair_page_delay_seconds > 0:
+        sleep(settings.sync_repair_page_delay_seconds)
+
+
+def _recent_sync_cutoff_date(settings: Settings) -> date:
+    return datetime.now().date() - timedelta(days=settings.sync_recent_lookback_days)
 
 
 def _canonical_existing_event_id(existing_events: list[CalendarEventResult]) -> str | None:

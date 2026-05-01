@@ -3,16 +3,23 @@ from datetime import date, datetime
 from app.config import MappingFilter, Settings, SyncMapping
 from app.models import CalendarEventResult, NotionDate, NotionTask
 from app.state_store import SyncStateRecord
-from app.sync import build_calendar_event, decide_sync_action, sync_page_object, sync_page_payload
+from app.sync import build_calendar_event, decide_sync_action, sync_error_pages, sync_page_object, sync_page_payload, sync_recent_pages
 from app.sync import page_matches_mapping_filters
 
 
 class FakeNotionClient:
+    def __init__(self) -> None:
+        self.pages_by_id: dict[str, dict] = {}
+        self.recent_pages: list[dict] = []
+
     def get_page(self, page_id: str) -> dict:
-        raise NotImplementedError
+        return self.pages_by_id[page_id]
 
     def query_database_for_sync_candidates(self) -> list[dict]:
         return []
+
+    def query_database_for_recent_candidates(self, start_on_or_after: date) -> list[dict]:
+        return self.recent_pages
 
 
 class FakeGoogleCalendarClient:
@@ -50,6 +57,14 @@ class FakeStateStore:
         prefix = "" if mapping_id == "default" else f"{mapping_id}:"
         return sorted(key.removeprefix(prefix) for key in self.records if key.startswith(prefix))
 
+    def list_error_page_ids(self, mapping_id: str = "default") -> list[str]:
+        prefix = "" if mapping_id == "default" else f"{mapping_id}:"
+        return sorted(
+            key.removeprefix(prefix)
+            for key, record in self.records.items()
+            if key.startswith(prefix) and record.last_error
+        )
+
     def upsert_success(
         self, page_id: str, event_id: str, sync_hash: str, calendar_url: str | None = None, mapping_id: str = "default"
     ) -> None:
@@ -74,16 +89,18 @@ def _state_key(page_id: str, mapping_id: str) -> str:
     return f"{mapping_id}:{page_id}"
 
 
-def _settings(done_behavior: str = "delete") -> Settings:
-    return Settings(
-        NOTION_TOKEN="x",
-        NOTION_DATABASE_ID="db",
-        GOOGLE_CLIENT_ID="client",
-        GOOGLE_CLIENT_SECRET="secret",
-        GOOGLE_REFRESH_TOKEN="refresh",
-        GOOGLE_CALENDAR_ID="primary",
-        SYNC_DONE_BEHAVIOR=done_behavior,
-    )
+def _settings(done_behavior: str = "delete", **overrides: object) -> Settings:
+    values = {
+        "NOTION_TOKEN": "x",
+        "NOTION_DATABASE_ID": "db",
+        "GOOGLE_CLIENT_ID": "client",
+        "GOOGLE_CLIENT_SECRET": "secret",
+        "GOOGLE_REFRESH_TOKEN": "refresh",
+        "GOOGLE_CALENDAR_ID": "primary",
+        "SYNC_DONE_BEHAVIOR": done_behavior,
+    }
+    values.update(overrides)
+    return Settings(**values)
 
 
 def _task(**overrides: object) -> NotionTask:
@@ -216,6 +233,37 @@ def test_sync_page_payload_uses_inline_page_without_fetching() -> None:
 
     assert result.created == 1
     assert state_store.records["page-1"].event_id == "created-1"
+
+
+def test_sync_error_pages_retries_only_pages_marked_with_errors(monkeypatch) -> None:
+    monkeypatch.setattr("app.sync.sleep", lambda seconds: None)
+    notion_client = FakeNotionClient()
+    gcal_client = FakeGoogleCalendarClient()
+    state_store = FakeStateStore()
+    error_task = _task(page_id="page-error")
+    notion_client.pages_by_id["page-error"] = _page_from_task(error_task)
+    state_store.records["page-error"] = SyncStateRecord(page_id="page-error", event_id="", last_error="rate limited")
+    state_store.records["page-ok"] = SyncStateRecord(page_id="page-ok", event_id="evt-ok", sync_hash="hash-ok")
+
+    result = sync_error_pages(notion_client, gcal_client, state_store, _settings())
+
+    assert result.total == 1
+    assert result.created == 1
+    assert state_store.records["page-error"].event_id == "created-1"
+
+
+def test_sync_recent_pages_checks_recent_candidates(monkeypatch) -> None:
+    monkeypatch.setattr("app.sync.sleep", lambda seconds: None)
+    notion_client = FakeNotionClient()
+    gcal_client = FakeGoogleCalendarClient()
+    state_store = FakeStateStore()
+    notion_client.recent_pages = [_page_from_task(_task(page_id="recent-1", title="Recent task"))]
+
+    result = sync_recent_pages(notion_client, gcal_client, state_store, _settings(SYNC_RECENT_LOOKBACK_DAYS=5))
+
+    assert result.total == 1
+    assert result.created == 1
+    assert state_store.records["recent-1"].event_id == "created-1"
 
 
 def test_sync_page_object_adopts_existing_calendar_event_when_state_is_missing() -> None:

@@ -90,15 +90,6 @@ class GoogleCalendarClient:
         for event in self._list_events(privateExtendedProperty=f"notionPageId={page_id}"):
             _add_event_result(events_by_id, event)
 
-        normalized_page_id = page_id.replace("-", "")
-        if normalized_page_id != page_id:
-            for event in self._list_events(privateExtendedProperty=f"notionPageId={normalized_page_id}"):
-                _add_event_result(events_by_id, event)
-
-        for event in self._list_events(q=page_id):
-            if f"Page ID: {page_id}" in str(event.get("description", "")):
-                _add_event_result(events_by_id, event)
-
         return sorted(events_by_id.values(), key=_event_sort_key)
 
     def _list_events(self, **params: Any) -> list[dict[str, Any]]:

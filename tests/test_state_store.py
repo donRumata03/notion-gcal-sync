@@ -32,6 +32,10 @@ def test_sync_state_store_uses_sqlite_by_default(tmp_path) -> None:
     assert record.calendar_url == "https://calendar.test/event-1"
     assert record.last_error is None
 
+    store.upsert_error("page-2", "boom")
+
+    assert store.list_error_page_ids() == ["page-2"]
+
 
 def test_sync_state_store_uses_postgres_when_database_url_is_set(monkeypatch) -> None:
     monkeypatch.setattr(PostgresStateStore, "_initialize", lambda self: None)
@@ -94,6 +98,16 @@ def test_firestore_state_store_keeps_mapping_scoped_keys(monkeypatch) -> None:
     assert learning_record.event_id == "event-learning"
     assert store.list_page_ids(mapping_id="main") == ["page-1"]
     assert store.list_page_ids(mapping_id="learning") == ["page-1"]
+
+
+def test_firestore_state_store_lists_only_error_page_ids(monkeypatch) -> None:
+    monkeypatch.setattr(FirestoreStateStore, "_make_client", lambda self, settings: FakeFirestoreClient())
+    store = SyncStateStore(_settings(STATE_BACKEND="firestore"))
+
+    store.upsert_success("page-ok", "event-1", "hash-1", mapping_id="main")
+    store.upsert_error("page-error", "boom", mapping_id="main")
+
+    assert store.list_error_page_ids(mapping_id="main") == ["page-error"]
 
 
 class FakeFirestoreClient:

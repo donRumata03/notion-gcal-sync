@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from functools import cached_property
 from typing import Any
 
@@ -27,7 +28,13 @@ class NotionAPIClient:
 
     def query_database_for_sync_candidates(self) -> list[dict[str, Any]]:
         self._validate_required_schema()
+        return self._query_pages(self._build_query_filter())
 
+    def query_database_for_recent_candidates(self, start_on_or_after: date) -> list[dict[str, Any]]:
+        self._validate_required_schema()
+        return self._query_pages(self._build_query_filter(start_on_or_after=start_on_or_after))
+
+    def _query_pages(self, filter_payload: dict[str, Any]) -> list[dict[str, Any]]:
         pages: list[dict[str, Any]] = []
         cursor: str | None = None
         while len(pages) < self.settings.sync_max_pages:
@@ -36,7 +43,7 @@ class NotionAPIClient:
                 "data_source_id": self.data_source_id,
                 "page_size": min(remaining, 100),
                 "result_type": "page",
-                "filter": self._build_query_filter(),
+                "filter": filter_payload,
             }
             if cursor:
                 payload["start_cursor"] = cursor
@@ -84,10 +91,12 @@ class NotionAPIClient:
         if missing:
             raise NotionSchemaError(f"Missing required Notion properties: {', '.join(missing)}")
 
-    def _build_query_filter(self) -> dict[str, Any]:
+    def _build_query_filter(self, start_on_or_after: date | None = None) -> dict[str, Any]:
         filters: list[dict[str, Any]] = [
             {"property": self.mapping.date_property, "date": {"is_not_empty": True}},
         ]
+        if start_on_or_after is not None:
+            filters.append({"property": self.mapping.date_property, "date": {"on_or_after": start_on_or_after.isoformat()}})
         for mapping_filter in self.mapping.filters:
             if mapping_filter.type == "status_not_in":
                 for value in mapping_filter.values:

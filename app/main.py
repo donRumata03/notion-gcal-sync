@@ -10,7 +10,15 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 
 from app.config import get_settings
 from app.logging_utils import configure_logging, get_logger
-from app.sync import extract_page_ids_from_webhook, extract_page_payloads_from_webhook, sync_all, sync_page, sync_page_payload
+from app.sync import (
+    extract_page_ids_from_webhook,
+    extract_page_payloads_from_webhook,
+    sync_all,
+    sync_error_pages,
+    sync_page,
+    sync_page_payload,
+    sync_recent_pages,
+)
 
 
 configure_logging(os.getenv("LOG_LEVEL", "INFO"))
@@ -32,6 +40,21 @@ def sync_single_page(page_id: str) -> dict[str, Any]:
 @app.post("/sync-all")
 def sync_everything() -> dict[str, Any]:
     result = sync_all()
+    _log_sync_result("Manual sync_all finished.", result)
+    return result.model_dump(exclude={"results"})
+
+
+@app.post("/sync-errors")
+def sync_failed_pages() -> dict[str, Any]:
+    result = sync_error_pages()
+    _log_sync_result("Manual sync_errors finished.", result)
+    return result.model_dump(exclude={"results"})
+
+
+@app.post("/sync-recent")
+def sync_recently_dated_pages() -> dict[str, Any]:
+    result = sync_recent_pages()
+    _log_sync_result("Manual sync_recent finished.", result)
     return result.model_dump(exclude={"results"})
 
 
@@ -53,18 +76,26 @@ async def notion_webhook(request: Request, background_tasks: BackgroundTasks) ->
 
     page_payloads = extract_page_payloads_from_webhook(payload)
     page_ids = sorted(page_payloads) or sorted(extract_page_ids_from_webhook(payload))
-    logger.info("Received Notion webhook.", extra={"page_ids_count": len(page_ids), "top_level_keys": sorted(payload.keys())})
+    logger.info(
+        "Received Notion webhook. payload_page_count=%s page_ids=%s top_level_keys=%s",
+        len(page_payloads),
+        page_ids,
+        sorted(payload.keys()),
+    )
 
     if page_payloads:
+        logger.info("Queueing webhook inline page sync. page_ids=%s", sorted(page_payloads))
         for page_payload in page_payloads.values():
             background_tasks.add_task(_background_sync_page_payload, page_payload)
         return {"ok": True, "queued_pages": len(page_payloads)}
 
     if page_ids:
+        logger.info("Queueing webhook page-id sync. page_ids=%s", page_ids)
         for page_id in page_ids:
             background_tasks.add_task(_background_sync_page, page_id)
         return {"ok": True, "queued_pages": len(page_ids)}
 
+    logger.info("Webhook payload did not contain recognizable page data; queueing full sync.")
     background_tasks.add_task(_background_sync_all)
     return {"ok": True, "queued_sync_all": True}
 
@@ -78,21 +109,50 @@ def _verify_notion_signature(raw_body: bytes, provided_signature: str, secret: s
 
 def _background_sync_page(page_id: str) -> None:
     try:
-        sync_page(page_id)
+        result = sync_page(page_id)
+        _log_sync_result("Background sync_page finished.", result)
     except Exception:
-        logger.exception("Background sync_page failed.", extra={"page_id": page_id})
+        logger.exception("Background sync_page failed. page_id=%s", page_id)
 
 
 def _background_sync_page_payload(page: dict[str, Any]) -> None:
     page_id = page.get("id")
     try:
-        sync_page_payload(page)
+        result = sync_page_payload(page)
+        _log_sync_result("Background sync_page_payload finished.", result)
     except Exception:
-        logger.exception("Background sync_page_payload failed.", extra={"page_id": page_id})
+        logger.exception("Background sync_page_payload failed. page_id=%s", page_id)
 
 
 def _background_sync_all() -> None:
     try:
-        sync_all()
+        result = sync_all()
+        _log_sync_result("Background sync_all finished.", result)
     except Exception:
         logger.exception("Background sync_all failed.")
+
+
+def _log_sync_result(prefix: str, result: Any) -> None:
+    page_results = []
+    for item in getattr(result, "results", []):
+        page_results.append(
+            {
+                "page_id": item.page_id,
+                "status": item.status,
+                "event_id": item.event_id,
+                "error": item.error,
+            }
+        )
+
+    logger.info(
+        "%s total=%s created=%s updated=%s deleted=%s unchanged=%s skipped=%s errors=%s results=%s",
+        prefix,
+        getattr(result, "total", 0),
+        getattr(result, "created", 0),
+        getattr(result, "updated", 0),
+        getattr(result, "deleted", 0),
+        getattr(result, "unchanged", 0),
+        getattr(result, "skipped", 0),
+        getattr(result, "errors", 0),
+        page_results,
+    )
